@@ -142,10 +142,21 @@ public:
     API_FUNCTION() SpriteHandle AddSprite(const Sprite& sprite);
 
     /// <summary>
+    /// Adds many sprites.
+    /// </summary>
+    /// <param name="sprites">The sprites.</param>
+    API_FUNCTION() void AddSprites(const Array<Sprite>& sprites);
+
+    /// <summary>
     /// Removes the sprite.
     /// </summary>
     /// <param name="index">The sprite index.</param>
     API_FUNCTION() void RemoveSprite(int32 index);
+
+    /// <summary>
+    /// Removes all sprites.
+    /// </summary>
+    API_FUNCTION() void RemoveAllSprites();
 
 #if USE_EDITOR
 

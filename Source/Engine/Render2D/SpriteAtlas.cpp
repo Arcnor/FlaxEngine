@@ -78,9 +78,22 @@ SpriteHandle SpriteAtlas::AddSprite(const Sprite& sprite)
     return SpriteHandle(this, index);
 }
 
+void SpriteAtlas::AddSprites(const Array<Sprite>& sprites)
+{
+    for (const auto& sprite : sprites)
+    {
+        Sprites.Add(sprite);
+    }
+}
+
 void SpriteAtlas::RemoveSprite(int32 index)
 {
     Sprites.RemoveAt(index);
+}
+
+void SpriteAtlas::RemoveAllSprites()
+{
+    Sprites.Clear();
 }
 
 #if USE_EDITOR

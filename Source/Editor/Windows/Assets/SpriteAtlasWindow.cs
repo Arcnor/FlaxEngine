@@ -1,5 +1,8 @@
 // Copyright (c) 2012-2023 Wojciech Figat. All rights reserved.
 
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
 using System.Linq;
 using System.Xml;
 using FlaxEditor.Content;
@@ -31,9 +34,11 @@ namespace FlaxEditor.Windows.Assets
         /// <seealso cref="FlaxEditor.Viewport.Previews.SpriteAtlasPreview" />
         private sealed class AtlasView : SpriteAtlasPreview
         {
-            public AtlasView(bool useWidgets)
-            : base(useWidgets)
-            {
+            private readonly PropertiesProxy _propertiesProxy;
+
+            public AtlasView(bool useWidgets, ref PropertiesProxy properties)
+            : base(useWidgets) {
+                _propertiesProxy = properties;
             }
 
             protected override void DrawTexture(ref Rectangle rect)
@@ -42,17 +47,40 @@ namespace FlaxEditor.Windows.Assets
 
                 if (Asset && Asset.IsLoaded)
                 {
-                    var count = Asset.SpritesCount;
                     var style = Style.Current;
 
                     // Draw all splits
-                    for (int i = 0; i < count; i++)
-                    {
-                        var sprite = Asset.GetSprite(i);
+                    foreach (var sprite in Asset.Sprites) {
                         var area = sprite.Area;
                         var position = area.Location * rect.Size + rect.Location;
                         var size = area.Size * rect.Size;
+                        // TODO: Add "DrawRectangles" to avoid paying C# -> C++ cost multiple times
                         Render2D.DrawRectangle(new Rectangle(position, size), style.BackgroundSelected);
+                    }
+
+                    switch (_propertiesProxy.GenOptions.Mode) {
+                    case PropertiesProxy.SpritesGenOptions.SliceMode.GridByCellSize: {
+                        var opts = _propertiesProxy.GenOptions.GridByCellSize;
+                        var sizeX = opts.PixelSize.X;
+                        var sizeY = opts.PixelSize.Y;
+
+                        if (sizeX <= 0 || sizeY <= 0) break;
+
+                        var rectLoc = rect.Location;
+                        var rectSize = rect.Size;
+                        GenerateGridByCellSize(Asset, opts, sizeX, sizeY, (posX, posY, spriteSize) => {
+                            // TODO: Add "DrawRectangles" to avoid paying C# -> C++ cost multiple times
+                            Render2D.DrawRectangle(new Rectangle(new Float2(posX, posY) * rectSize + rectLoc, spriteSize * rectSize), Color.Red);
+                        });
+
+                        break;
+                    }
+
+                    case PropertiesProxy.SpritesGenOptions.SliceMode.GridByCellCount: break;
+
+                    case PropertiesProxy.SpritesGenOptions.SliceMode.Freeform: break;
+
+                    default: throw new ArgumentOutOfRangeException();
                     }
                 }
             }
@@ -65,6 +93,8 @@ namespace FlaxEditor.Windows.Assets
         private sealed class PropertiesProxy
         {
             private SpriteAtlasWindow _window;
+
+            public Action Reslice;
 
             public class SpriteEntry
             {
@@ -98,7 +128,50 @@ namespace FlaxEditor.Windows.Assets
                 }
             }
 
-            [EditorOrder(0), EditorDisplay("Sprites")]
+            public struct GridByCellSizeOptions {
+                public Int2 PixelSize;
+                public Int2 Offset;
+                public Int2 Padding;
+                public bool KeepEmptyRects;
+            }
+
+            public struct GridByCellCountOptions {
+                [Range(0, 1000)]
+                public Int2 ColumnRow;
+                public Int2 Offset;
+                public Int2 Padding;
+                public bool KeepEmptyRects;
+            }
+
+            public struct SpritesGenOptions {
+                public enum SliceMode {
+                    GridByCellSize, GridByCellCount, Freeform
+                }
+
+                public SliceMode Mode;
+
+                /// <summary>
+                /// Prefix to use when generating sprites, appended by a number
+                /// </summary>
+                [DefaultValue("New Sprite")]
+                public string Prefix;
+
+                // [EditorDisplay("Sprites Generation", EditorDisplayAttribute.InlineStyle)]
+                [VisibleIfValue(nameof(Mode), SliceMode.GridByCellSize)]
+                // [EditorDisplay(null, EditorDisplayAttribute.InlineStyle)]
+                public GridByCellSizeOptions GridByCellSize;
+                // [EditorDisplay("Sprites Generation", EditorDisplayAttribute.InlineStyle)]
+                [VisibleIfValue(nameof(Mode), SliceMode.GridByCellCount)]
+                // [EditorDisplay(null, EditorDisplayAttribute.InlineStyle)]
+                public GridByCellCountOptions GridByCellCount;
+
+                public Action Reslice;
+            }
+
+            [EditorOrder(0), EditorDisplay("Sprites Generation", EditorDisplayAttribute.InlineStyle)]
+            public SpritesGenOptions GenOptions;
+
+            [EditorOrder(100), EditorDisplay("Sprites")]
             [CustomEditor(typeof(SpritesCollectionEditor))]
             public SpriteEntry[] Sprites;
 
@@ -112,6 +185,7 @@ namespace FlaxEditor.Windows.Assets
                     base.Initialize(layout);
 
                     layout.Space(10);
+
                     var reimportButton = layout.Button("Reimport");
                     reimportButton.Button.Clicked += () => ((PropertiesProxy)Values[0]).Reimport();
                 }
@@ -180,6 +254,7 @@ namespace FlaxEditor.Windows.Assets
             {
                 // Link
                 _window = win;
+                GenOptions.Reslice += Reslice;
                 UpdateSprites();
 
                 // Try to restore target asset texture import options (useful for fast reimport)
@@ -220,6 +295,7 @@ namespace FlaxEditor.Windows.Assets
                 // Unlink
                 _window = null;
                 Sprites = null;
+                GenOptions.Reslice -= Reslice;
             }
         }
 
@@ -244,8 +320,11 @@ namespace FlaxEditor.Windows.Assets
                 Parent = this
             };
 
+            _properties = new PropertiesProxy();
+            _properties.Reslice += OnReslice;
+
             // Sprite atlas preview
-            _preview = new AtlasView(true)
+            _preview = new AtlasView(true, ref _properties)
             {
                 Parent = _split.Panel1
             };
@@ -253,7 +332,6 @@ namespace FlaxEditor.Windows.Assets
             // Sprite atlas properties editor
             _propertiesEditor = new CustomEditorPresenter(null);
             _propertiesEditor.Panel.Parent = _split.Panel2;
-            _properties = new PropertiesProxy();
             _propertiesEditor.Select(_properties);
             _propertiesEditor.Modified += MarkAsEdited;
 
@@ -277,6 +355,105 @@ namespace FlaxEditor.Windows.Assets
             _toolstrip.AddButton(editor.Icons.CenterView64, _preview.CenterView).LinkTooltip("Center view");
         }
 
+        private void OnReslice() {
+            switch (_properties.GenOptions.Mode) {
+            case PropertiesProxy.SpritesGenOptions.SliceMode.GridByCellSize: {
+                var opts = _properties.GenOptions.GridByCellSize;
+                var sizeX = opts.PixelSize.X;
+                var sizeY = opts.PixelSize.Y;
+
+                if (sizeX <= 0 || sizeY <= 0) break;
+
+                Asset.RemoveAllSprites();
+                var sprites = new List<Sprite>();
+
+                GenerateGridByCellSize(Asset, opts, sizeX, sizeY, (posX, posY, spriteSize) => {
+                    var sprite = new Sprite
+                    {
+                        Name = Utilities.Utils.IncrementNameNumber(_properties.GenOptions.Prefix, name => !string.IsNullOrWhiteSpace(name) && sprites.All(spr => spr.Name != name)),
+                        Area = new Rectangle(new Float2(posX, posY), spriteSize),
+                    };
+                    sprites.Add(sprite);
+                });
+
+                Asset.AddSprites(sprites.ToArray());
+
+                break;
+            }
+
+            case PropertiesProxy.SpritesGenOptions.SliceMode.GridByCellCount: {
+                var opts = _properties.GenOptions.GridByCellCount;
+                var numX = opts.ColumnRow.X;
+                var numY = opts.ColumnRow.Y;
+
+                if (numX <= 0 || numY <= 0) break;
+
+                Asset.RemoveAllSprites();
+
+                var offsetX = Mathf.Clamp(opts.Offset.X / Asset.Size.X, 0f, 1f);
+                var offsetY = Mathf.Clamp(opts.Offset.Y / Asset.Size.Y, 0f, 1f);
+                var paddingX = Mathf.Clamp(opts.Padding.X / Asset.Size.X, 0f, 1f);
+                var paddingY = Mathf.Clamp(opts.Padding.Y / Asset.Size.Y, 0f, 1f);
+                var scaleX = (1.0f - offsetX) / numX;
+                var scaleY = (1.0f - offsetY) / numY;
+
+                var spriteSize = new Float2(scaleX - paddingX, scaleY - paddingY);
+                // TODO: We could use a fixed array to avoid dynamic memory allocs, however we don't really know how many sprites we'll end up with if we ignore empty ones, for example
+                var sprites = new List<Sprite>();
+
+                for (int y = 0; y < numY; y++) {
+                    var posY = offsetY + scaleY * y;
+
+                    for (int x = 0; x < numX; x++) {
+                        var posX = offsetX + scaleX * x;
+
+                        var sprite = new Sprite
+                        {
+                            Name = Utilities.Utils.IncrementNameNumber(_properties.GenOptions.Prefix, name => !string.IsNullOrWhiteSpace(name) && sprites.All(spr => spr.Name != name)),
+                            Area = new Rectangle(new Float2(posX, posY), spriteSize),
+                        };
+                        sprites.Add(sprite);
+                    }
+                }
+
+                Asset.AddSprites(sprites.ToArray());
+
+                break;
+            }
+
+            case PropertiesProxy.SpritesGenOptions.SliceMode.Freeform: break;
+
+            default: throw new ArgumentOutOfRangeException();
+            }
+
+            MarkAsEdited();
+            _properties.UpdateSprites();
+            _propertiesEditor.BuildLayout();
+        }
+
+        private static void GenerateGridByCellSize(TextureBase asset, PropertiesProxy.GridByCellSizeOptions opts, int sizeX, int sizeY, Action<float, float, Float2> callback) {
+            var offsetX = Mathf.Clamp(opts.Offset.X / asset.Size.X, 0f, 1f);
+            var offsetY = Mathf.Clamp(opts.Offset.Y / asset.Size.Y, 0f, 1f);
+            var paddingX = Mathf.Clamp(opts.Padding.X / asset.Size.X, 0f, 1f);
+            var paddingY = Mathf.Clamp(opts.Padding.Y / asset.Size.Y, 0f, 1f);
+            var scaleX = Mathf.Clamp(sizeX / asset.Size.X, 0f, 1f);
+            var scaleY = Mathf.Clamp(sizeY / asset.Size.Y, 0f, 1f);
+
+            var spriteSize = new Float2(scaleX, scaleY);
+
+            float posY = offsetY;
+
+            while (posY + spriteSize.Y - 1.0f < Mathf.Epsilon) {
+                float posX = offsetX;
+
+                while (posX + spriteSize.X - 1.0f < Mathf.Epsilon) {
+                    callback.Invoke(posX, posY, spriteSize);
+                    posX += scaleX + paddingX;
+                }
+                posY += scaleY + paddingY;
+            }
+        }
+
         /// <inheritdoc />
         public override void Save()
         {
@@ -291,6 +468,9 @@ namespace FlaxEditor.Windows.Assets
 
             ClearEditedFlag();
             _item.RefreshThumbnail();
+
+            _properties.UpdateSprites();
+            _propertiesEditor.BuildLayout();
         }
 
         /// <inheritdoc />
